@@ -1,99 +1,259 @@
-/*
-  Botrix Jail Script (Pure JavaScript)
-  ------------------------------------
-  Handles chat-triggered jail & key commands from Botrix.
-  - Supports window.postMessage (for Botrix overlay actions)
-  - Optional WebSocket connection (if you have one)
-  - Works in OBS Browser Source
-
-  Usage in Botrix Custom JS Action:
-  window.postMessage(JSON.stringify({ action: 'jail', user: '{user}' }), '*');
-  window.postMessage(JSON.stringify({ action: 'key', user: '{user}' }), '*');
+/* botrix-jail.js
+   Self-contained Botrix Jail overlay script:
+   - Creates overlay DOM + CSS automatically
+   - Listens to window.postMessage({ action: 'jail'|'key', user: 'name' })
+   - Optional WebSocket: set window.BOTRIX_JAIL_CONFIG = { BOTRIX_WS: 'wss://...' } BEFORE loading this script
+   - Test: press J (jail) or K (key). Use ?test=0 in URL to hide test UI.
 */
 
-// ===== CONFIG =====
-const BOTRIX_WS = null; // optional: set your WebSocket URL here (e.g. "wss://your-botrix-ws.example.com")
+(function () {
+  'use strict';
 
-// ===== STATE =====
-let isJailed = false;
-let hideTimeout = null;
+  // -------- CONFIG (optionally set window.BOTRIX_JAIL_CONFIG before loading script) --------
+  var CFG = window.BOTRIX_JAIL_CONFIG || {};
+  var BOTRIX_WS = CFG.BOTRIX_WS || null; // e.g. 'wss://your-ws.example'
+  var OVERLAY_ID = 'botrix-jail-overlay';
+  var STYLE_ID = 'botrix-jail-styles';
 
-// ===== ELEMENTS =====
-const jailBox = document.getElementById('jailBox');
-const jailMsg = document.getElementById('jailMsg');
-const jailTitle = document.getElementById('jailTitle');
-
-// ===== FUNCTIONS =====
-function showJail(user) {
-  clearTimeout(hideTimeout);
-  jailTitle.textContent = "You're in Jail!";
-  jailMsg.textContent = user ? `${user} sent you to jail!` : 'Sentenced by chat';
-  jailBox.classList.remove('hide', 'show');
-  void jailBox.offsetWidth; // restart animation
-  jailBox.classList.add('show');
-  isJailed = true;
-}
-
-function freeJail(user) {
-  clearTimeout(hideTimeout);
-  jailTitle.textContent = 'Out of Jail!';
-  jailMsg.textContent = user ? `${user} used a key! You're free!` : 'You are free!';
-  jailBox.classList.remove('show');
-  jailBox.classList.add('hide');
-  isJailed = false;
-}
-
-function handleEvent(evt) {
-  if (!evt) return;
-  const action = (evt.action || evt.type || (evt.command && evt.command.replace(/^!/, '')) || '').toLowerCase();
-  const user = evt.user || evt.username || evt.from || 'chat';
-  if (action === 'jail') showJail(user);
-  if ((action === 'key' || action === 'unlock' || action === 'release') && isJailed) freeJail(user);
-}
-
-// ===== POSTMESSAGE HANDLER (from Botrix overlay) =====
-window.addEventListener('message', (ev) => {
-  if (!ev.data) return;
-  let payload;
-  try {
-    payload = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
-  } catch {
-    payload = { action: ev.data };
+  // Prevent double-loading
+  if (document.getElementById(OVERLAY_ID)) {
+    console.warn('Botrix jail overlay already loaded.');
+    return;
   }
-  handleEvent(payload);
-});
 
-// ===== OPTIONAL: WebSocket (if you want real-time link) =====
-if (BOTRIX_WS) {
-  (function connectWS() {
+  // -------- inject styles --------
+  function injectStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    var css = '\
+#' + OVERLAY_ID + ' { position: fixed; left: 28px; bottom: 28px; width: auto; pointer-events: none; z-index: 999999; font-family: Inter, Arial, sans-serif; }\
+#' + OVERLAY_ID + ' .b-jail { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:10px; backdrop-filter: blur(6px); background: rgba(0,0,0,0.55); color:#fff; box-shadow: 0 6px 18px rgba(0,0,0,0.5); opacity:0; transform: translateY(18px) scale(.98); pointer-events: none; }\
+#' + OVERLAY_ID + ' .b-jail svg { width:56px; height:56px; flex:0 0 56px; }\
+#' + OVERLAY_ID + ' .b-title { font-weight:700; font-size:15px; }\
+#' + OVERLAY_ID + ' .b-sub { font-size:12px; opacity:.95; }\
+#' + OVERLAY_ID + ' .show { animation: bShow .55s cubic-bezier(.2,.9,.3,1) forwards; }\
+#' + OVERLAY_ID + ' .hide { animation: bHide .4s ease-in forwards; }\
+@keyframes bShow { 0% { opacity:0; transform: translateY(18px) scale(.98); } 100% { opacity:1; transform: translateY(0) scale(1); } }\
+@keyframes bHide { 0% { opacity:1; transform: translateY(0) scale(1);} 100% { opacity:0; transform: translateY(12px) scale(.96);} }\
+/* Test UI (pointer-events enabled) */\
+#' + OVERLAY_ID + ' .b-test-ui { position: fixed; right: 18px; bottom: 18px; background: rgba(0,0,0,0.45); padding:8px; border-radius:8px; color:#fff; font-size:13px; z-index:999999; pointer-events: auto; }\
+#' + OVERLAY_ID + ' .b-test-ui input { padding:6px; border-radius:6px; border:0; outline:none; }\
+#' + OVERLAY_ID + ' .b-test-ui button { margin-left:6px; padding:6px 8px; border-radius:6px; border:0; cursor:pointer; }\
+';
+    var s = document.createElement('style');
+    s.id = STYLE_ID;
+    s.textContent = css;
+    document.head.appendChild(s);
+  }
+
+  // -------- create DOM elements --------
+  function createElements() {
+    var container = document.createElement('div');
+    container.id = OVERLAY_ID;
+
+    container.innerHTML = '\
+<div class="b-jail" id="bJailBox" role="status" aria-hidden="true">\
+  <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">\
+    <rect x="6" y="6" width="108" height="108" rx="10" fill="#000" opacity="0.18"/>\
+    <g stroke="#d7e1ff" stroke-width="5" stroke-linecap="round">\
+      <line x1="36" y1="20" x2="36" y2="100" />\
+      <line x1="60" y1="20" x2="60" y2="100" />\
+      <line x1="84" y1="20" x2="84" y2="100" />\
+    </g>\
+    <circle cx="60" cy="68" r="14" fill="#ffdcbc"/>\
+  </svg>\
+  <div style="pointer-events:none">\
+    <div class="b-title" id="bJailTitle">You\\'re in Jail!</div>\
+    <div class="b-sub" id="bJailMsg">Sentenced by chat</div>\
+  </div>\
+</div>\
+<div class="b-test-ui" id="bTestUI">\
+  <label>Simulate:</label>\
+  <input id="bTestInput" placeholder="jail or key" />\
+  <button id="bTestBtn">Send</button>\
+  <div style="margin-top:6px;font-size:12px;opacity:.9;">Hotkeys: J = jail, K = key</div>\
+</div>\
+';
+    document.body.appendChild(container);
+
+    // hide test ui if ?test=0
     try {
-      const ws = new WebSocket(BOTRIX_WS);
-      ws.addEventListener('open', () => console.log('Botrix WS connected'));
-      ws.addEventListener('message', (m) => {
-        try {
-          const data = JSON.parse(m.data);
-          handleEvent(data);
-        } catch {
-          handleEvent({ action: m.data });
-        }
-      });
-      ws.addEventListener('close', () => {
-        console.warn('WS closed, retrying in 5s...');
-        setTimeout(connectWS, 5000);
-      });
-      ws.addEventListener('error', (err) => {
-        console.error('Botrix WS error', err);
-        ws.close();
-      });
-    } catch (err) {
-      console.error('WebSocket init failed', err);
-      setTimeout(connectWS, 5000);
-    }
-  })();
-}
+      var params = new URL(window.location.href).searchParams;
+      if (params.get('test') === '0') {
+        var t = document.getElementById('bTestUI');
+        if (t) t.style.display = 'none';
+      }
+    } catch (e) { /* ignore */ }
 
-// ===== TEST KEYS (local) =====
-window.addEventListener('keydown', (e) => {
-  if (e.key.toLowerCase() === 'j') handleEvent({ action: 'jail', user: 'Local' });
-  if (e.key.toLowerCase() === 'k') handleEvent({ action: 'key', user: 'Local' });
-});
+    return container;
+  }
+
+  // -------- references & state --------
+  injectStyles();
+  var root = createElements();
+  var jailBox = document.getElementById('bJailBox');
+  var jailTitle = document.getElementById('bJailTitle');
+  var jailMsg = document.getElementById('bJailMsg');
+  var testUI = document.getElementById('bTestUI');
+  var testBtn = document.getElementById('bTestBtn');
+  var testInput = document.getElementById('bTestInput');
+
+  var isJailed = false;
+  var hideTimer = null;
+  var ws = null;
+  var reconnectDelay = 1500;
+
+  // -------- core behavior --------
+  function showJail(user) {
+    if (!jailBox) return;
+    clearTimeout(hideTimer);
+    jailTitle.textContent = "You're in Jail!";
+    jailMsg.textContent = user ? (user + ' sent you to jail!') : 'Sentenced by chat';
+    jailBox.classList.remove('hide');
+    // retrigger
+    jailBox.classList.remove('show');
+    // force reflow to restart animation
+    /* eslint-disable no-unused-expressions */
+    void jailBox.offsetWidth;
+    /* eslint-enable no-unused-expressions */
+    jailBox.classList.add('show');
+    isJailed = true;
+  }
+
+  function freeJail(user) {
+    if (!jailBox) return;
+    clearTimeout(hideTimer);
+    jailTitle.textContent = 'Out of Jail!';
+    jailMsg.textContent = user ? (user + " used a key! You're free!") : 'You are free!';
+    jailBox.classList.remove('show');
+    jailBox.classList.add('hide');
+    isJailed = false;
+  }
+
+  function parseActionFromPayload(payload) {
+    if (!payload) return null;
+    // Normalize shapes:
+    // { action:'jail', user:'name' } or { type:'jail', user:'name' } or { command:'!jail' }
+    var action = null;
+    var user = payload.user || payload.username || payload.sender || payload.from || payload.name || '';
+    if (payload.action) action = String(payload.action);
+    else if (payload.type) action = String(payload.type);
+    else if (payload.command) action = String(payload.command);
+    else if (typeof payload === 'string') action = payload;
+    if (action) {
+      action = action.trim().toLowerCase();
+      // if it's "!jail" remove '!'
+      if (action.charAt(0) === '!') action = action.slice(1);
+    }
+    return { action: action, user: user };
+  }
+
+  function handleEvent(payload) {
+    try {
+      var parsed = parseActionFromPayload(payload);
+      if (!parsed || !parsed.action) return;
+      if (parsed.action === 'jail') showJail(parsed.user || 'chat');
+      else if ((parsed.action === 'key' || parsed.action === 'unlock' || parsed.action === 'release') && isJailed) {
+        freeJail(parsed.user || 'chat');
+      }
+    } catch (e) {
+      console.error('Botrix jail handleEvent error', e);
+    }
+  }
+
+  // -------- postMessage listener (Botrix recommended) --------
+  window.addEventListener('message', function (ev) {
+    if (!ev || (ev.data === undefined)) return;
+    var payload = null;
+    try {
+      if (typeof ev.data === 'string') {
+        try {
+          payload = JSON.parse(ev.data);
+        } catch (e) {
+          // not JSON -> treat string as action name
+          payload = { action: ev.data };
+        }
+      } else {
+        payload = ev.data;
+      }
+    } catch (e) {
+      console.error('Botrix jail message parse error', e);
+      return;
+    }
+    handleEvent(payload);
+  }, false);
+
+  // -------- optional WebSocket integration --------
+  if (BOTRIX_WS) {
+    (function connectWS() {
+      try {
+        ws = new WebSocket(BOTRIX_WS);
+        ws.addEventListener('open', function () {
+          console.log('Botrix jail WS connected');
+          reconnectDelay = 1500;
+        });
+        ws.addEventListener('message', function (m) {
+          if (!m || !m.data) return;
+          var data = null;
+          try { data = JSON.parse(m.data); } catch (e) { data = m.data; }
+          handleEvent(data);
+        });
+        ws.addEventListener('error', function (err) {
+          console.error('Botrix jail WS error', err);
+          try { ws.close(); } catch (e) { /* noop */ }
+        });
+        ws.addEventListener('close', function () {
+          console.warn('Botrix jail WS closed — reconnecting in ' + Math.round(reconnectDelay / 1000) + 's');
+          setTimeout(connectWS, reconnectDelay);
+          reconnectDelay = Math.min(60000, reconnectDelay * 1.5);
+        });
+      } catch (err) {
+        console.error('Botrix jail WS init failed', err);
+        setTimeout(connectWS, reconnectDelay);
+      }
+    }());
+  }
+
+  // -------- test UI handlers --------
+  if (testBtn && testInput) {
+    testBtn.addEventListener('click', function () {
+      var txt = (testInput.value || '').trim();
+      if (!txt) return;
+      // support JSON or plain words
+      try {
+        if (txt.charAt(0) === '{') {
+          var obj = JSON.parse(txt);
+          handleEvent(obj);
+        } else {
+          handleEvent({ action: txt.toLowerCase(), user: 'Tester' });
+        }
+      } catch (err) {
+        console.error('Test input parse error', err);
+      }
+      testInput.value = '';
+    });
+    testInput.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') testBtn.click();
+    });
+  }
+
+  // -------- keyboard shortcuts (local testing) --------
+  window.addEventListener('keydown', function (e) {
+    if (!e) return;
+    try {
+      var k = e.key.toLowerCase();
+      if (k === 'j') handleEvent({ action: 'jail', user: 'Local' });
+      if (k === 'k') handleEvent({ action: 'key', user: 'Local' });
+    } catch (err) { /* ignore */ }
+  });
+
+  // -------- ready log --------
+  console.log('Botrix jail overlay initialized. Use window.postMessage or WS to trigger jail/key.');
+  console.log('Example: window.postMessage(JSON.stringify({ action: \"jail\", user: \"alice\" }), \"*\");');
+
+  // expose a small API
+  window.BotrixJailOverlay = {
+    showJail: function (u) { showJail(u); },
+    freeJail: function (u) { freeJail(u); },
+    handleEvent: function (p) { handleEvent(p); }
+  };
+})();
