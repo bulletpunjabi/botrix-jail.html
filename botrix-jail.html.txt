@@ -1,102 +1,39 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Botrix Jail Overlay (Bottom-left)</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    html,body{height:100%;margin:0;background:transparent;font-family:Inter,Arial, sans-serif;overflow:hidden;}
-    .wrap{position:relative;width:1920px;height:1080px;}
-    /* Reduced-size bottom-left box */
-    .jail-wrap{position:absolute;left:28px;bottom:28px;pointer-events:none;width:240px;z-index:50}
-    .jail {display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;
-          backdrop-filter:blur(6px);background:rgba(0,0,0,0.55);color:#fff;
-          box-shadow:0 6px 18px rgba(0,0,0,0.5);opacity:0;transform:translateY(18px) scale(.98);}
-    .jail svg{width:56px;height:56px;flex:0 0 56px;}
-    .title{font-weight:700;font-size:15px}
-    .sub{font-size:12px;opacity:.9}
-    .show{animation:showAnim .55s cubic-bezier(.2,.9,.3,1) forwards}
-    .hide{animation:hideAnim .4s ease-in forwards}
-    @keyframes showAnim{0%{opacity:0;transform:translateY(18px) scale(.98)}100%{opacity:1;transform:translateY(0) scale(1)}}
-    @keyframes hideAnim{0%{opacity:1;transform:translateY(0) scale(1)}100%{opacity:0;transform:translateY(12px) scale(.96)}}
-    /* small test UI - visible while testing locally */
-    .test-ui{position:fixed;right:18px;bottom:18px;background:rgba(0,0,0,0.45);padding:8px;border-radius:8px;color:#fff;font-size:13px;z-index:999;}
-    .test-ui input{padding:6px;border-radius:6px;border:0;outline:none}
-    .test-ui button{margin-left:6px;padding:6px 8px;border-radius:6px;border:0;cursor:pointer}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="jail-wrap" aria-hidden="true">
-      <div id="jailBox" class="jail" role="status">
-        <!-- small jail icon -->
-        <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <rect x="6" y="6" width="108" height="108" rx="10" fill="#000" opacity="0.18"/>
-          <g stroke="#d7e1ff" stroke-width="5" stroke-linecap="round">
-            <line x1="36" y1="20" x2="36" y2="100" />
-            <line x1="60" y1="20" x2="60" y2="100" />
-            <line x1="84" y1="20" x2="84" y2="100" />
-          </g>
-          <circle cx="60" cy="68" r="14" fill="#ffdcbc"/>
-        </svg>
-
-        <div>
-          <div id="jailTitle" class="title">You're in Jail!</div>
-          <div id="jailMsg" class="sub">Sentenced by chat</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Test UI (remove or hide with ?test=0 in OBS URL) -->
-    <div id="testUI" class="test-ui">
-      <label>Simulate:</label>
-      <input id="testInput" placeholder="jail or key" />
-      <button id="testBtn">Send</button>
-      <div style="margin-top:6px;font-size:12px;opacity:.9;">Hotkeys: J = jail, K = key</div>
-    </div>
-  </div>
-
-<script>
 /*
-  Botrix-compatible overlay
-  - Preferred: Botrix -> overlay via window.postMessage({ action: 'jail'|'key', user: 'name' })
-    (configure this in Botrix custom overlay action / custom JS or use a webhook that posts to the page)
-  - Optional: If you have a WebSocket endpoint you want to use, set BOTRIX_WS to that url.
+  Botrix Jail Script (Pure JavaScript)
+  ------------------------------------
+  Handles chat-triggered jail & key commands from Botrix.
+  - Supports window.postMessage (for Botrix overlay actions)
+  - Optional WebSocket connection (if you have one)
+  - Works in OBS Browser Source
+
+  Usage in Botrix Custom JS Action:
+  window.postMessage(JSON.stringify({ action: 'jail', user: '{user}' }), '*');
+  window.postMessage(JSON.stringify({ action: 'key', user: '{user}' }), '*');
 */
 
-/* ---------- CONFIG ---------- */
-/* If you have a Botrix WebSocket URL (wss://...), paste it here; otherwise leave null */
-const BOTRIX_WS = null; // e.g. 'wss://your-botrix-ws.example.com' or null
+// ===== CONFIG =====
+const BOTRIX_WS = null; // optional: set your WebSocket URL here (e.g. "wss://your-botrix-ws.example.com")
 
-/* OBS: to hide test UI, add ?test=0 to the Browser Source URL in OBS */
-const urlParams = new URLSearchParams(window.location.search);
-if (urlParams.get('test') === '0') {
-  const t = document.getElementById('testUI'); if (t) t.style.display = 'none';
-}
+// ===== STATE =====
+let isJailed = false;
+let hideTimeout = null;
 
-/* ---------- DOM ---------- */
+// ===== ELEMENTS =====
 const jailBox = document.getElementById('jailBox');
 const jailMsg = document.getElementById('jailMsg');
 const jailTitle = document.getElementById('jailTitle');
 
-/* state */
-let isJailed = false;
-let hideTimeout = null; // optional if you want auto-hide later
-
-/* show jail overlay */
+// ===== FUNCTIONS =====
 function showJail(user) {
   clearTimeout(hideTimeout);
   jailTitle.textContent = "You're in Jail!";
   jailMsg.textContent = user ? `${user} sent you to jail!` : 'Sentenced by chat';
-  jailBox.classList.remove('hide');
-  // retrigger show animation if already visible
-  jailBox.classList.remove('show');
-  void jailBox.offsetWidth;
+  jailBox.classList.remove('hide', 'show');
+  void jailBox.offsetWidth; // restart animation
   jailBox.classList.add('show');
   isJailed = true;
 }
 
-/* hide overlay (free) */
 function freeJail(user) {
   clearTimeout(hideTimeout);
   jailTitle.textContent = 'Out of Jail!';
@@ -106,119 +43,57 @@ function freeJail(user) {
   isJailed = false;
 }
 
-/* message handler for unified event format */
 function handleEvent(evt) {
-  // evt shape examples supported:
-  // { action: 'jail'|'key', user: 'name' }   <- recommended (postMessage or websocket)
-  // { type: 'jail'|'key', user: 'name' }     <- alternate
-  // { command: '!jail' }                     <- simple text command
-  try {
-    if (!evt) return;
-    const action = (evt.action || evt.type || (evt.command && evt.command.replace(/^!/,''))).toString().toLowerCase?.();
-    const user = evt.user || evt.sender || evt.username || evt.from || '';
-    if (!action) return;
-    if (action === 'jail') showJail(user || 'chat');
-    if ((action === 'key' || action === 'unlock' || action === 'release') && isJailed) freeJail(user || 'chat');
-  } catch (e) {
-    console.error('handleEvent error', e);
-  }
+  if (!evt) return;
+  const action = (evt.action || evt.type || (evt.command && evt.command.replace(/^!/, '')) || '').toLowerCase();
+  const user = evt.user || evt.username || evt.from || 'chat';
+  if (action === 'jail') showJail(user);
+  if ((action === 'key' || action === 'unlock' || action === 'release') && isJailed) freeJail(user);
 }
 
-/* ---------- POSTMESSAGE (Botrix custom overlay) ---------- */
-/* Botrix allows custom overlays/actions — configure the overlay action to send:
-     window.postMessage({ action: 'jail', user: 'username' }, '*')
-   or send 'key' when freeing.
-   This handler receives those messages securely here.
-*/
+// ===== POSTMESSAGE HANDLER (from Botrix overlay) =====
 window.addEventListener('message', (ev) => {
-  // Optional: check origin if you host overlay somewhere specific
-  // if (ev.origin !== 'https://botrix.live') return;
   if (!ev.data) return;
-  // If Botrix sends string payload, try parse
-  const payload = (typeof ev.data === 'string') ? (() => {
-    try { return JSON.parse(ev.data); } catch { return { action: ev.data }; }
-  })() : ev.data;
+  let payload;
+  try {
+    payload = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
+  } catch {
+    payload = { action: ev.data };
+  }
   handleEvent(payload);
 });
 
-/* ---------- OPTIONAL: WebSocket (if you have a WS endpoint) ---------- */
+// ===== OPTIONAL: WebSocket (if you want real-time link) =====
 if (BOTRIX_WS) {
   (function connectWS() {
     try {
       const ws = new WebSocket(BOTRIX_WS);
       ws.addEventListener('open', () => console.log('Botrix WS connected'));
-      ws.addEventListener('message', m => {
+      ws.addEventListener('message', (m) => {
         try {
           const data = JSON.parse(m.data);
           handleEvent(data);
-        } catch (e) {
-          // if raw string, forward as action
+        } catch {
           handleEvent({ action: m.data });
         }
       });
       ws.addEventListener('close', () => {
-        console.warn('Botrix WS closed. Reconnecting in 5s...');
+        console.warn('WS closed, retrying in 5s...');
         setTimeout(connectWS, 5000);
       });
-      ws.addEventListener('error', err => { console.error('Botrix WS error', err); ws.close(); });
+      ws.addEventListener('error', (err) => {
+        console.error('Botrix WS error', err);
+        ws.close();
+      });
     } catch (err) {
-      console.error('WebSocket init error', err);
+      console.error('WebSocket init failed', err);
       setTimeout(connectWS, 5000);
     }
   })();
 }
 
-/* ---------- LOCAL TEST UI (simple) ---------- */
-const testBtn = document.getElementById('testBtn');
-const testInput = document.getElementById('testInput');
-if (testBtn && testInput) {
-  testBtn.addEventListener('click', () => {
-    const txt = (testInput.value || '').trim();
-    if (!txt) return;
-    // support sending "jail" or "key" or JSON
-    try {
-      if (txt.startsWith('{')) {
-        const obj = JSON.parse(txt);
-        handleEvent(obj);
-      } else {
-        // plain words
-        handleEvent({ action: txt.toLowerCase(), user: 'Tester' });
-      }
-    } catch (e) {
-      console.error('Test parse error', e);
-    }
-    testInput.value = '';
-  });
-  testInput.addEventListener('keydown', e => { if (e.key === 'Enter') testBtn.click(); });
-}
-
-/* ---------- HOTKEY TEST (J/K) ---------- */
-window.addEventListener('keydown', e => {
+// ===== TEST KEYS (local) =====
+window.addEventListener('keydown', (e) => {
   if (e.key.toLowerCase() === 'j') handleEvent({ action: 'jail', user: 'Local' });
   if (e.key.toLowerCase() === 'k') handleEvent({ action: 'key', user: 'Local' });
 });
-
-/* ---------- NOTES for Botrix setup (how to send events) ----------
-1) POSTMESSAGE method (recommended & simple):
-   - In Botrix, create a custom overlay or a custom JavaScript action that runs on your command.
-   - In that action call:
-       window.postMessage(JSON.stringify({ action: 'jail', user: '{user}' }), '*')
-     or for freeing:
-       window.postMessage(JSON.stringify({ action: 'key', user: '{user}' }), '*')
-   - OBS Browser Source will receive the message automatically.
-
-2) WebSocket method (advanced):
-   - If you host a small relay or Botrix supports WS and gives you a wss:// URL, set BOTRIX_WS above.
-   - The overlay will connect and parse JSON messages from the socket.
-
-3) If your Botrix custom action only sends plain text like "!jail", this overlay will also accept that.
-
-If you want, I can:
- - Provide the exact Botrix Custom JS snippet you paste into a Botrix action to post the message.
- - Or modify the overlay to automatically hide the test UI and enable CORS/security checks.
-*/
-
-/* End of overlay script */
-</script>
-</body>
-</html>
